@@ -1,140 +1,171 @@
 #include <iostream>
 #include <fstream>
 #include <mpi.h>
-#include <list>
 #include <vector>
+#include <list>
 #include <string>
 
 using namespace std;
 
 vector<int> merge(vector<int> left, vector<int> right) {
-	vector<int> result;
+    vector<int> result;
 
-	while (!left.empty() || !right.empty()) {
+    while (!left.empty() || !right.empty()) {
 
-		if (!left.empty() && !right.empty()) {
-			if (left.front() <= right.front()) {
-				result.push_back(left.front());
-				left.erase(left.begin());
-			} else {
-				result.push_back(right.front());
-				right.erase(right.begin());
-			}
-		} else if (!left.empty()) {
-			for (auto val : left) {
-				result.push_back(val);
-			}
+        if (!left.empty() && !right.empty()) {
+            if (left.front() <= right.front()) {
+                result.push_back(left.front());
+                left.erase(left.begin());
+            } 
+            else {
+                result.push_back(right.front());
+                right.erase(right.begin());
+            }
+        } 
+        else if (!left.empty()) {
+            for (auto val : left) {
+                result.push_back(val);
+            }
 
-			break;
-		} else if (!right.empty()) {
-			for (auto val : right) {
-				result.push_back(val);
-			}
+            break;
+        } else if (!right.empty()) {
+            for (auto val : right) {
+                result.push_back(val);
+            }
 
-			break;
-		}
-	}
+            break;
+        }
+    }
 
-	return result;
+    return result;
 }
 
-vector<int> mergeSort(vector<int> initial) {
-	vector<int> left;
-	vector<int> right;
-	vector<int> result;
+vector<int> mergeSortRec(int rank, int arraySize, vector<int> input, int worldSize){
 
-	if (initial.size() <= 1)
-		return initial;
+    if (arraySize <= 1) {
+        return input;
+    }
 
-	int middle = (initial.size() + 1) / 2;
+    int middle = arraySize / 2;
+    vector<int> left(input.begin(), input.begin() + middle);
+    vector<int> right(input.begin() + middle, input.end());
 
-	for (int i = 0; i < middle; i++) {
-		left.push_back(initial[i]);
-	}
+    // Split the array in two in case we have more than two processes available
+    if (worldSize >= 2) {
+        int child = rank + worldSize / 2;
 
-	for (int i = middle; i < initial.size(); i++) {
-		right.push_back(initial[i]);
-	}
+        // Send half the array to a child
+        MPI_Send(right.data(), arraySize - middle, MPI_INT, child, 1, MPI_COMM_WORLD);
 
-	left = mergeSort(left);
-	right = mergeSort(right);
+        // Sort the other half of the array
+        left = mergeSortRec(rank, middle, left, worldSize / 2);
 
-	return merge(left, right);
+        // Get the sorted array from the child
+        MPI_Status status;
+        MPI_Recv(right.data(), arraySize - middle, MPI_INT, child, 1, MPI_COMM_WORLD, &status);
+    } else {
+        // Otherwise sort both halves recursively in the same process
+        left = mergeSortRec(rank, middle, left, 1);
+        right = mergeSortRec(rank, arraySize - middle, right, 1);
+    }
+
+    auto result =  merge(left, right);
+
+    return result;
 }
 
-int main(int argc, char** argv) {
-	list<int> dataInputs = { 100, 1000, 10000, 50000, 100000, 300000, 600000, 1000000 };
+// Worker function for child processes to sort sub arrays recursively
+void mergeWorker(int size, int rank, int worldSize){
 
-	// Initialize MPI
-	int worldRank;
-	int worldSize;
+    // Find the parrent of the current process
+    int base = 0;
+    int parent;
+    int offset = rank;
 
-	MPI_Init(&argc, &argv);
-	MPI_Comm_rank(MPI_COMM_WORLD, &worldRank);
-	MPI_Comm_size(MPI_COMM_WORLD, &worldSize);
+    while (offset > 0) {
+        parent = base;
+        int mid = worldSize / 2;
+        if (offset < mid) {
+            size = size / 2;
+            worldSize = worldSize / 2;
+        }
+        else {
+            offset = offset - mid;
+            size = size / 2 + size % 2;
+            worldSize = worldSize / 2 + worldSize % 2;
+            base += mid;
+        }
+    }
 
-	for (auto testSize : dataInputs) {
+    // Get data from the parent process
+    vector<int> v(size);
+    MPI_Status status;
+    MPI_Recv(v.data(), size, MPI_INT, parent, 1, MPI_COMM_WORLD, &status);
 
-		clock_t start;
-		clock_t finish;
+    // Sort the sub array
+    auto result = mergeSortRec(rank, v.size(), v, worldSize);
 
-		// Define the files used for the tests
-		auto inputFileName = "..\\Input Data\\data_input_" + to_string(testSize) + ".txt";
-		auto outputFileName = "..\\Output Data\\Parallel implementation MPI\\data_output_" + to_string(testSize) + ".txt";
+    // Send the sorted array back to the parent
+    MPI_Send(result.data(), size, MPI_INT, parent, 1, MPI_COMM_WORLD);
+}
 
-		ifstream fin(inputFileName);
-		ofstream fout(outputFileName);
+int main(int argc, char** argv){
 
-		vector<int> vector;
-		int number;
+    list<int> dataInputs = { 100, 1000, 10000, 50000, 100000, 300000, 600000, 1000000};
 
-		if (worldRank == 0) {
-			// Read the input data
-			for (int index = 0; index < testSize; index++) {
-				fin >> number;
-				vector.push_back(number);
-			}
-		}
+    // Initialize MPI
+    int worldRank;
+    int worldSize;
 
-		// Divide the initial vector for each process
-		int partialSize = testSize / worldSize;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &worldRank);
+    MPI_Comm_size(MPI_COMM_WORLD, &worldSize);
 
-		std::vector<int> recVector(partialSize);
-		
-		// Start the timer before scattering the array
-		if (worldRank == 0) {
-			start = clock();
-		}
+    for (auto testSize : dataInputs) {
+        clock_t start;
+        clock_t finish;
 
-		// Send each subarray to each process
-		MPI_Scatter(vector.data(), partialSize, MPI_INT, recVector.data(), partialSize, MPI_INT, 0, MPI_COMM_WORLD);
+        // Define the files used for the tests
+        auto inputFileName = "..\\Input Data\\data_input_" + to_string(testSize) + ".txt";
+        auto outputFileName = "..\\Output Data\\Parallel implementation MPI\\data_output_" + to_string(testSize) + ".txt";
+        
+        ifstream fin(inputFileName);
+        ofstream fout(outputFileName);
 
-		// MergeSort each sub-array of the vector
-		recVector = mergeSort(recVector);
+        vector<int> vector;
+        if (worldRank == 0) {
+            int number;
 
-		// Gather all subarrays in one vector
-		MPI_Gather(recVector.data(), partialSize, MPI_INT, vector.data(), partialSize, MPI_INT, 0, MPI_COMM_WORLD);
+            // Read the input data
+            for (int index = 0; index < testSize; index++) {
+                fin >> number;
+                vector.push_back(number);
+            }
+            
+            // Save the start time
+            start = clock();
+            
+            vector = mergeSortRec(0, vector.size(), vector, worldSize);
+        } else {
+            mergeWorker(testSize, worldRank, worldSize);
+        }
 
-		// Sort the combined subarrays
-		if (worldRank == 0) {
-			vector = mergeSort(vector);
-			
-			// Save the finishing time
-			finish = clock();
-			
-			// Print the array
-			for (auto val: vector) {
-				fout << val <<" ";
-			}
-			
-			// Show the timer
-			cout << "\nTest on " + to_string(testSize) + " numbers, took " << ((double)finish - (double)start) / CLOCKS_PER_SEC << " seconds.\n";
-		}
+        if (worldRank == 0) {
+            // Save the end time of the test
+            finish = clock();
 
-		// Block processes so all of them start accordingly
-		MPI_Barrier(MPI_COMM_WORLD);
-	}
+            for (auto val : vector) {
+                fout << val << " ";
+            }
 
-	// Finalize MPI
-	MPI_Finalize();
+            // Show the timer
+            cout << "\nTest on " + to_string(testSize) + " numbers, took " << ((double)finish - (double)start) / CLOCKS_PER_SEC << " seconds.\n";
+        }
+
+        // Block processes so all of them start accordingly
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
+
+    // Finalize MPI
+    MPI_Finalize();
 }
